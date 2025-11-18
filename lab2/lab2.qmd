@@ -1,0 +1,14 @@
+---
+title: Aaaa
+author: Ja
+---
+
+
+```{python}
+
+from time import time
+print(time.time())
+
+```
+
+
