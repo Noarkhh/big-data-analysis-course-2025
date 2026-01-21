@@ -2,13 +2,12 @@ import json
 import time
 import threading
 import random
-import math
 from kafka import KafkaConsumer, KafkaProducer
 
 # --- Configuration ---
-KAFKA_BROKER = "localhost:9092"
-TOPIC_ORDERS = "orders"
-TOPIC_TRUCK_STATUS = "truck_status"
+KAFKA_BROKER = 'localhost:9092'
+TOPIC_ORDERS = 'orders'
+TOPIC_TRUCK_STATUS = 'truck_status'
 
 # Map settings
 MAP_SIZE = 100
@@ -17,57 +16,93 @@ DISPATCH_CENTERS = [
     {"x": 10, "y": 90},  # Center 2 (Top Left)
     {"x": 90, "y": 10},  # Center 3 (Bottom Right)
     {"x": 90, "y": 90},  # Center 4 (Top Right)
-    {"x": 50, "y": 50},  # Center 5 (Middle)
+    {"x": 50, "y": 50}   # Center 5 (Middle)
 ]
 
+# --- Schemas for JDBC Sink Connector ---
+
+# Schema for Truck Status (Flattened position)
+TRUCK_SCHEMA = {
+    "type": "struct",
+    "fields": [
+        {"type": "string", "optional": False, "field": "truck_id"},
+        {"type": "int32", "optional": False, "field": "pos_x"},
+        {"type": "int32", "optional": False, "field": "pos_y"},
+        {"type": "string", "optional": False, "field": "status"},
+        {"type": "string", "optional": True, "field": "current_order_id"},
+        {"type": "int64", "optional": False, "name": "org.apache.kafka.connect.data.Timestamp", "field": "timestamp"}
+    ],
+    "optional": False,
+    "name": "truck_status"
+}
+
+# Schema for Orders (Must match what Generator sends)
+ORDER_SCHEMA = {
+    "type": "struct",
+    "fields": [
+        {"type": "string", "optional": False, "field": "order_id"},
+        {"type": "string", "optional": False, "field": "client_id"},
+        {"type": "float", "optional": False, "field": "price"},
+        {"type": "string", "optional": False, "field": "status"},
+        {"type": "int64", "optional": False, "name": "org.apache.kafka.connect.data.Timestamp", "field": "timestamp"}
+    ],
+    "optional": False,
+    "name": "orders"
+}
+
+# --- Kafka Producer ---
 producer = KafkaProducer(
     bootstrap_servers=[KAFKA_BROKER],
-    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
 )
 
+def send_with_schema(topic, schema, data):
+    """Helper to wrap data in schema and send."""
+    payload = {"schema": schema, "payload": data}
+    producer.send(topic, payload)
 
-def simulate_truck_delivery(truck_id, order):
+def simulate_truck_delivery(truck_id, order_data):
     """Simulates a truck traveling from a hub to a random destination."""
-
-    # 1. Assign Start (Dispatch Center) and End (Customer)
+    
+    # 1. Assign Start (Dispatch Center) and End (Random Point)
     start_pos = random.choice(DISPATCH_CENTERS).copy()
-    destination = {"x": random.randint(0, MAP_SIZE), "y": random.randint(0, MAP_SIZE)}
-
+    destination = {
+        "x": random.randint(0, MAP_SIZE),
+        "y": random.randint(0, MAP_SIZE)
+    }
+    
     current_pos = start_pos.copy()
-
-    print(f"🚛 Truck {truck_id} starting at {current_pos} -> Dest {destination}")
-
-    # Update Order -> In Progress
-    order["status"] = "in_progress"
-    producer.send(TOPIC_ORDERS, order)
-
-    # 2. Movement Loop
+    
+    # 2. Update Order -> In Progress
+    # We copy the order data to preserve ID/Price/Client, just update Status/Time
+    order_update = order_data.copy()
+    order_update['status'] = 'in_progress'
+    order_update['timestamp'] = int(time.time() * 1000)
+    
+    send_with_schema(TOPIC_ORDERS, ORDER_SCHEMA, order_update)
+    
+    # 3. Movement Loop (Manhattan / Grid movement)
     while current_pos["x"] != destination["x"] or current_pos["y"] != destination["y"]:
-
+        
         # Calculate distance remaining
         dx = destination["x"] - current_pos["x"]
         dy = destination["y"] - current_pos["y"]
-
-        # Determine Move Distance (Speed): Random between 2 and 5 units
+        
+        # Determine Move Distance (Speed)
         step_size = random.randint(2, 5)
 
-        # LOGIC: Move along grid lines (Manhattan)
-        # We prioritize the axis with the larger distance to cover,
-        # but sometimes switch it up to look less robotic.
+        # Logic: Move along grid lines only
         move_x = False
-
         if abs(dx) > abs(dy):
             move_x = True
         elif abs(dy) > abs(dx):
             move_x = False
         else:
-            # If distances are equal, pick random axis
             move_x = random.choice([True, False])
 
         # Execute Move
         if move_x and dx != 0:
-            # Don't overshoot: min(step, distance_remaining)
-            actual_step = min(step_size, abs(dx))
+            actual_step = min(step_size, abs(dx)) 
             direction = 1 if dx > 0 else -1
             current_pos["x"] += actual_step * direction
         elif dy != 0:
@@ -75,58 +110,70 @@ def simulate_truck_delivery(truck_id, order):
             direction = 1 if dy > 0 else -1
             current_pos["y"] += actual_step * direction
 
-        # Send Status Update
+        # Send Status Update (FLATTENED for JDBC)
         truck_status = {
             "truck_id": truck_id,
-            "position": current_pos,
-            "timestamp": time.time(),
+            "pos_x": int(current_pos["x"]),
+            "pos_y": int(current_pos["y"]),
             "status": "shipping",
-            "current_order_id": order["order_id"],
-            "destination": destination,  # Optional: useful for debugging/viz
+            "current_order_id": order_data['order_id'],
+            "timestamp": int(time.time() * 1000)
         }
-        producer.send(TOPIC_TRUCK_STATUS, truck_status)
-
+        send_with_schema(TOPIC_TRUCK_STATUS, TRUCK_SCHEMA, truck_status)
+        
         # Simulation Tick
-        time.sleep(0.1)  # Update every 0.5 seconds
+        time.sleep(0.5) 
 
-    # 3. Delivery Complete
-    # Send final "delivered" status (optional, but good for logs)
-    # The visualizer handles removal via the Order topic, but we keep this for consistency.
+    # 4. Delivery Complete
+    # Send final "delivered" status to truck topic
     final_status = {
         "truck_id": truck_id,
-        "position": current_pos,
-        "timestamp": time.time(),
+        "pos_x": int(current_pos["x"]),
+        "pos_y": int(current_pos["y"]),
         "status": "delivered",
-        "current_order_id": order["order_id"],
+        "current_order_id": order_data['order_id'],
+        "timestamp": int(time.time() * 1000)
     }
-    producer.send(TOPIC_TRUCK_STATUS, final_status)
+    send_with_schema(TOPIC_TRUCK_STATUS, TRUCK_SCHEMA, final_status)
 
-    # Update Order -> Shipped (Triggers Visualizer Cleanup)
-    order["status"] = "shipped"
-    producer.send(TOPIC_ORDERS, order)
-
-    print(f"✅ Truck {truck_id} finished delivery at {current_pos}.")
-
+    # Update Order -> Shipped (Triggers Visualizer Cleanup & DB Final State)
+    order_final = order_data.copy()
+    order_final['status'] = 'shipped'
+    order_final['timestamp'] = int(time.time() * 1000)
+    
+    send_with_schema(TOPIC_ORDERS, ORDER_SCHEMA, order_final)
 
 def main():
     consumer = KafkaConsumer(
         TOPIC_ORDERS,
         bootstrap_servers=[KAFKA_BROKER],
-        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-        group_id="truck_service_group",
+        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+        group_id='truck_service_group_jdbc',
+        auto_offset_reset='latest'
     )
 
-    print("Truck Service Listening (Grid Movement Mode)...")
+    print("🚛 Truck Service Listening (Grid Mode + JDBC Support)...")
 
     for message in consumer:
-        order = message.value
+        try:
+            raw_msg = message.value
+            
+            # Unpack schema/payload wrapper if present
+            if isinstance(raw_msg, dict) and 'payload' in raw_msg:
+                order_data = raw_msg['payload']
+            else:
+                order_data = raw_msg
 
-        if order.get("status") == "received":
-            truck_id = f"truck_{random.randint(1000, 9999)}"
-            t = threading.Thread(target=simulate_truck_delivery, args=(truck_id, order))
-            t.start()
-
+            # Process only new orders
+            if order_data.get('status') == 'received':
+                truck_id = f"truck_{random.randint(1000, 9999)}"
+                
+                # Start simulation in a separate thread
+                t = threading.Thread(target=simulate_truck_delivery, args=(truck_id, order_data))
+                t.start()
+                
+        except Exception as e:
+            print(f"Error processing message: {e}")
 
 if __name__ == "__main__":
     main()
-

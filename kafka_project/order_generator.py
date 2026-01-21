@@ -4,9 +4,27 @@ import random
 import uuid
 from kafka import KafkaProducer
 
-# Configuration
 KAFKA_BROKER = "localhost:9092"
 TOPIC_ORDERS = "orders"
+
+# Define the Schema for Orders
+ORDER_SCHEMA = {
+    "type": "struct",
+    "fields": [
+        {"type": "string", "optional": False, "field": "order_id"},
+        {"type": "string", "optional": False, "field": "client_id"},
+        {"type": "float", "optional": False, "field": "price"},
+        {"type": "string", "optional": False, "field": "status"},
+        {
+            "type": "int64",
+            "optional": False,
+            "name": "org.apache.kafka.connect.data.Timestamp",
+            "field": "timestamp",
+        },
+    ],
+    "optional": False,
+    "name": "orders",
+}
 
 
 def generate_order():
@@ -14,8 +32,8 @@ def generate_order():
         "order_id": str(uuid.uuid4()),
         "client_id": f"client_{random.randint(1, 100)}",
         "price": round(random.uniform(10.0, 500.0), 2),
-        "status": "received",  # Initial status
-        "timestamp": time.time(),
+        "status": "received",
+        "timestamp": int(time.time() * 1000),  # Connect likes milliseconds
     }
 
 
@@ -25,16 +43,19 @@ def main():
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
     )
 
-    print(f"Starting Order Generator connected to {KAFKA_BROKER}...")
+    print(f"Starting Order Generator...")
 
     try:
         while True:
-            order = generate_order()
-            producer.send(TOPIC_ORDERS, order)
-            print(f"Sent order: {order['order_id']}")
-            time.sleep(random.uniform(0.02, 0.05))  # Send a new order every few seconds
+            data = generate_order()
+            # WRAP WITH SCHEMA
+            payload = {"schema": ORDER_SCHEMA, "payload": data}
+
+            producer.send(TOPIC_ORDERS, payload)
+            print(f"Sent order: {data['order_id']}")
+            time.sleep(0.05)
     except KeyboardInterrupt:
-        print("Stopping generator...")
+        pass
     finally:
         producer.close()
 
