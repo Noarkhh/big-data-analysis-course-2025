@@ -4,6 +4,7 @@ import time
 
 CONNECT_URL = "http://localhost:8083/connectors"
 
+
 def create_connector():
     config = {
         "name": "postgres-sink-connector",
@@ -21,12 +22,12 @@ def create_connector():
             # Add columns if schema changes
             "auto.evolve": "true",
             "insert.mode": "insert",
-            "pk.mode": "none"
-        }
+            "pk.mode": "none",
+        },
     }
 
-    headers = {'Content-Type': 'application/json'}
-    
+    headers = {"Content-Type": "application/json"}
+
     print("Waiting for Kafka Connect to start...")
     while True:
         try:
@@ -39,11 +40,13 @@ def create_connector():
 
     print("Deploying Connector...")
     response = requests.post(CONNECT_URL, headers=headers, data=json.dumps(config))
-    
-    if response.status_code in [201, 409]: # 409 means already exists
-        print("✅ Connector created successfully!")
+
+    if response.status_code in [201, 409]:  # 409 means already exists
+        print("Connector created successfully!")
     else:
-        print(f"❌ Failed: {response.text}")
+        print(f"Failed: {response.text}")
+
 
 if __name__ == "__main__":
     create_connector()
+
